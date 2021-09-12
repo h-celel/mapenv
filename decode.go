@@ -15,6 +15,8 @@ const (
 	mapEnvTagName string = "mpe"
 )
 
+var zeroValue reflect.Value
+
 // Decode decode current environmental variables into an output structure.
 // Output must be a pointer to a struct.
 func Decode(v interface{}) error {
@@ -41,10 +43,59 @@ func Decode(v interface{}) error {
 
 	newVal := reflect.New(t)
 
-	for i := 0; i < newVal.Elem().NumField(); i++ {
-		fTyp := t.Field(i)
-		isUnexported := fTyp.PkgPath != ""
+	err := decodeFields(val, newVal.Elem())
+	if err != nil {
+		return err
+	}
+
+	val.Set(newVal.Elem())
+
+	return nil
+}
+
+func decodeFields(oldVal, newVal reflect.Value) error {
+	t := newVal.Type()
+	for i := 0; i < newVal.NumField(); i++ {
+		f := t.Field(i)
+
+		// don't decode to unexported fields
+		isUnexported := f.PkgPath != ""
 		if isUnexported {
+			continue
+		}
+
+		fTyp := f.Type
+		fVal := newVal.Field(i)
+
+		oldFVal := zeroValue
+		if oldVal != zeroValue {
+			oldFVal = oldVal.Field(i)
+		}
+
+		// iterate over embedded fields
+		if f.Anonymous {
+			for fTyp.Kind() == reflect.Ptr {
+				fTyp = fTyp.Elem()
+
+				if fVal.IsNil() {
+					fVal.Set(reflect.New(fTyp))
+				}
+
+				if oldFVal != zeroValue && oldFVal.IsNil() {
+					oldFVal = zeroValue
+				}
+
+				fVal = fVal.Elem()
+				if oldFVal != zeroValue {
+					oldFVal = oldFVal.Elem()
+				}
+			}
+
+			err := decodeFields(oldFVal, fVal)
+			if err != nil {
+				return err
+			}
+
 			continue
 		}
 
@@ -52,25 +103,25 @@ func Decode(v interface{}) error {
 		var tag string
 		var ok bool
 
-		fieldTags := getFieldTags(fTyp)
+		fieldTags := getFieldTags(f)
 		for _, tag = range fieldTags {
 			if s, ok = os.LookupEnv(tag); ok {
 				break
 			}
 		}
 		if len(s) == 0 {
+			if oldFVal != zeroValue {
+				fVal.Set(oldFVal)
+			}
+
 			continue
 		}
 
-		fVal := newVal.Elem().Field(i)
 		err := decodeValue(s, fVal.Addr())
 		if err != nil {
 			return newDecodeError(fmt.Sprintf("unable to decode value in field '%s'", tag), tag, err)
 		}
 	}
-
-	val.Set(newVal.Elem())
-
 	return nil
 }
 
